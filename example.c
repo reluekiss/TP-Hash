@@ -1,4 +1,6 @@
 #include <stdio.h>
+
+#define TP_DTABLE_IMPLEMENTATION
 #include "tp_dtable.h"
 
 int main(void) {

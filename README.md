@@ -28,3 +28,10 @@ Place the header file (`tp_dtable.h`) in your project directory. In one source f
 ```c
 #define TP_DTABLE_IMPLEMENTATION
 #include "tp_dtable.h"
+```
+
+To run the example:
+```console
+$ cc -O3 -o example example.c
+$ ./example
+```
