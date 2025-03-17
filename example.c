@@ -13,7 +13,7 @@ typedef struct {
 
 int main(void) {
     /* Create a table for uint32_t keys and my_value_t values */
-    dtable_t *dt = dt_create(sizeof(uint32_t), sizeof(my_value_t));
+    dtable_t *dt = dt_create(sizeof(char*), sizeof(my_value_t));
     if (!dt) {
         fprintf(stderr, "Failed to create table\n");
         return 1;
