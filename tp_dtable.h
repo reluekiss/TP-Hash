@@ -155,19 +155,13 @@ void dt_destroy(dtable_t *dt) {
     munmap(dt, sizeof(dtable_t));
 }
 
-/* dt_reset() resets the table to an empty state by clearing the active region,
-   setting the active capacity back to INITIAL_CAPACITY, and zeroing the count and bitmap.
-*/
 void dt_reset(dtable_t *dt) {
     if (!dt) return;
     dt->count = 0;
     dt->current_capacity = INITIAL_CAPACITY;
-    /* Clear keys and values in the active region */
-    memset(dt->keys, 0, dt->current_capacity * sizeof(uint32_t));
-    memset(dt->values, 0, dt->current_capacity * sizeof(uint32_t));
-    /* Clear the bitmap for active buckets (activeBuckets = current_capacity / BUCKET_SIZE) */
-    uint32_t activeBuckets = dt->current_capacity / BUCKET_SIZE;
-    memset(dt->bitmap, 0, activeBuckets * sizeof(uint8_t));
+    memset(dt->keys, 0, MAX_CAPACITY * sizeof(uint32_t));
+    memset(dt->values, 0, MAX_CAPACITY * sizeof(uint32_t));
+    memset(dt->bitmap, 0, (MAX_CAPACITY / BUCKET_SIZE) * sizeof(uint8_t));
 }
 
 size_t dt_active_memory_usage(dtable_t *dt) {
