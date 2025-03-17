@@ -41,6 +41,7 @@ void dt_destroy(dt_t *dt);
 tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value);
 int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out);
 int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp);
+void dt_reset(dt_t *dt);
 
 #endif /* TP_DT_H */
 
@@ -259,6 +260,22 @@ int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp) {
     else if (tp.table_id == 1)
         return lb_delete(dt->secondary, key, tp.bucket, tp.slot);
     return 0;
+}
+
+void dt_reset(dt_t *dt) {
+    lb_table_t *t = dt->primary;
+    t->current_capacity = INITIAL_CAPACITY;
+    t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
+    memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
+    memset(t->keys, 0, MAX_CAPACITY * t->key_size);
+    memset(t->values, 0, MAX_CAPACITY * t->value_size);
+
+    t = dt->secondary;
+    t->current_capacity = INITIAL_CAPACITY;
+    t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
+    memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
+    memset(t->keys, 0, MAX_CAPACITY * t->key_size);
+    memset(t->values, 0, MAX_CAPACITY * t->value_size);
 }
 
 #endif /* TP_DT_IMPLEMENTATION */

@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdint.h>
 #define TP_DT_IMPLEMENTATION
 #include "tp_dtable.h"
 #include <stdio.h>
@@ -6,6 +7,30 @@
 #include <time.h>
 
 #define NOPS 1000000
+
+static inline uint32_t ceil_log2(uint32_t x) {
+    uint32_t bits = 0;
+    uint32_t power = 1;
+    while (power < x) {
+        power <<= 1;
+        bits++;
+    }
+    return bits;
+}
+
+static inline uint32_t dt_total_ptr_bits(void) {
+    uint32_t num_buckets_primary = (MAX_CAPACITY + PRIMARY_BUCKET_SIZE - 1) / PRIMARY_BUCKET_SIZE;
+    uint32_t primary_bucket_bits = ceil_log2(num_buckets_primary);
+    uint32_t primary_slot_bits = ceil_log2(PRIMARY_BUCKET_SIZE);
+    uint32_t primary_total = 1 + primary_bucket_bits + primary_slot_bits; // 1 bit for table id
+
+    uint32_t num_buckets_secondary = (MAX_CAPACITY + SECONDARY_BUCKET_SIZE - 1) / SECONDARY_BUCKET_SIZE;
+    uint32_t secondary_bucket_bits = ceil_log2(num_buckets_secondary);
+    uint32_t secondary_slot_bits = ceil_log2(SECONDARY_BUCKET_SIZE);
+    uint32_t secondary_total = 1 + secondary_bucket_bits + secondary_slot_bits;
+
+    return (primary_total > secondary_total) ? primary_total : secondary_total;
+}
 
 int main(void) {
     dt_t *dt = dt_create(sizeof(uint32_t), sizeof(uint32_t));
@@ -21,10 +46,9 @@ int main(void) {
     uint64_t insert_count = 0, lookup_count = 0, delete_count = 0;
     
     clock_t start = clock();
-    
     for (uint32_t op = 0; op < NOPS; op++) {
-        int r = rand() % 100;
-        if (r < 50) { // Insert
+        int r = rand() % 1000;
+        if (r < 500) { // Insert
             uint32_t key = rand();
             uint32_t value = rand();
             tiny_ptr_t tp = dt_insert(dt, &key, &value);
@@ -32,17 +56,16 @@ int main(void) {
                 aux_keys[aux_count] = key;
                 aux_ptrs[aux_count] = tp;
                 aux_count++;
-                /* Rough estimate: table_id (1 bit) + bucket (assume 8 bits) + slot (assume 8 bits) */
-                total_ptr_bits += 1 + 8 + 8;
+                total_ptr_bits += dt_total_ptr_bits();
                 insert_count++;
             }
-        } else if (r < 80) { // Lookup
+        } else if (r < 800) { // Lookup
             if (aux_count > 0) {
                 uint32_t idx = rand() % aux_count;
                 dt_lookup(dt, &aux_keys[idx], aux_ptrs[idx], NULL);
                 lookup_count++;
             }
-        } else { // Delete
+        } else if (r < 999) { // Delete
             if (aux_count > 0) {
                 uint32_t idx = rand() % aux_count;
                 if (dt_delete(dt, &aux_keys[idx], aux_ptrs[idx])) {
@@ -52,6 +75,8 @@ int main(void) {
                     delete_count++;
                 }
             }
+        } else {
+            dt_reset(dt);
         }
     }
 
