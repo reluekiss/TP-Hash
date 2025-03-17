@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #define TP_DTABLE_IMPLEMENTATION
-#include "tp_dtable.h"  // Use the generic single-header implementation
+#include "tp_dtable.h"
 
 /* Define a struct to use as the value */
 typedef struct {
@@ -49,7 +49,7 @@ int main(void) {
             printf("Lookup: key %s not found\n", keys[i]);
     }
 
-    /* Delete key 100 */
+    /* Delete key "hello" */
     {
         char* key_del = "hello";
         if (dt_delete(dt, &key_del))
@@ -58,15 +58,15 @@ int main(void) {
             printf("Deletion failed for key %s\n", key_del);
     }
 
-    /* Lookup key 100 again after deletion */
+    /* Lookup key "hello" again after deletion */
     {
-        uint32_t key_check = 100;
+        char* key_check = "hello";
         my_value_t found;
         if (dt_lookup(dt, &key_check, &found))
-            printf("Lookup after deletion: key %u found with value {data=%u, label=%s} (unexpected)\n",
+            printf("Lookup after deletion: key %s found with value {data=%u, label=%s} (unexpected)\n",
                    key_check, found.data, found.label);
         else
-            printf("Lookup after deletion: key %u not found (expected)\n", key_check);
+            printf("Lookup after deletion: key %s not found (expected)\n", key_check);
     }
 
     /* Print active memory usage */
