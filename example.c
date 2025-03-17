@@ -1,58 +1,91 @@
 #include <stdio.h>
-
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #define TP_DTABLE_IMPLEMENTATION
-#include "tp_dtable.h"
+#include "tp_dtable.h"  // Use the generic single-header implementation
+
+/* Define a struct to use as the value */
+typedef struct {
+    uint32_t data;
+    char label[16];
+} my_value_t;
 
 int main(void) {
-    dtable_t *dt = dt_create();
+    /* Create a table for uint32_t keys and my_value_t values */
+    dtable_t *dt = dt_create(sizeof(uint32_t), sizeof(my_value_t));
     if (!dt) {
         fprintf(stderr, "Failed to create table\n");
         return 1;
     }
     printf("Created table with active capacity: %u slots\n", dt->current_capacity);
 
-    // Insert some key/value pairs.
-    uint32_t keys[]   = {42, 100, 2021};
-    uint32_t values[] = {123, 456, 789};
+    /* Insert some key/value pairs */
+    char* keys[] = { "1", "2", "hello"};
+    my_value_t values[3];
+    values[0].data = 123;
+    snprintf(values[0].label, sizeof(values[0].label), "val_%s", keys[0]);
+    values[1].data = 456;
+    snprintf(values[1].label, sizeof(values[1].label), "val_%s", keys[1]);
+    values[2].data = 789;
+    snprintf(values[2].label, sizeof(values[2].label), "val_%s", keys[2]);
+
     for (int i = 0; i < 3; i++) {
-        uint32_t tp = dt_insert(dt, keys[i], values[i]);
+        uint32_t tp = dt_insert(dt, &keys[i], &values[i]);
         if (tp == UINT32_MAX)
-            printf("Insertion failed for key %u\n", keys[i]);
+            printf("Insertion failed for key %s\n", keys[i]);
         else
-            printf("Inserted key %u with value %u, tiny pointer = %u\n", keys[i], values[i], tp);
+            printf("Inserted key %s with value {data=%u, label=%s}, tiny pointer = %u\n",
+                   keys[i], values[i].data, values[i].label, tp);
     }
 
-    // Lookup the inserted keys.
+    /* Lookup the inserted keys */
     for (int i = 0; i < 3; i++) {
-        uint32_t found;
-        if (dt_lookup(dt, keys[i], &found))
-            printf("Lookup: key %u found with value %u\n", keys[i], found);
+        my_value_t found;
+        if (dt_lookup(dt, &keys[i], &found))
+            printf("Lookup: key %s found with value {data=%u, label=%s}\n",
+                   keys[i], found.data, found.label);
         else
-            printf("Lookup: key %u not found\n", keys[i]);
+            printf("Lookup: key %s not found\n", keys[i]);
     }
 
-    // Delete key 100.
-    if (dt_delete(dt, 100))
-        printf("Deleted key %u successfully\n", 100);
-    else
-        printf("Deletion failed for key %u\n", 100);
+    /* Delete key 100 */
+    {
+        char* key_del = "hello";
+        if (dt_delete(dt, &key_del))
+            printf("Deleted key %s successfully\n", key_del);
+        else
+            printf("Deletion failed for key %s\n", key_del);
+    }
 
-    // Lookup key 100 again after deletion.
-    uint32_t found;
-    if (dt_lookup(dt, 100, &found))
-        printf("Lookup after deletion: key %u found with value %u (unexpected)\n", 100, found);
-    else
-        printf("Lookup after deletion: key %u not found (expected)\n", 100);
+    /* Lookup key 100 again after deletion */
+    {
+        uint32_t key_check = 100;
+        my_value_t found;
+        if (dt_lookup(dt, &key_check, &found))
+            printf("Lookup after deletion: key %u found with value {data=%u, label=%s} (unexpected)\n",
+                   key_check, found.data, found.label);
+        else
+            printf("Lookup after deletion: key %u not found (expected)\n", key_check);
+    }
 
-    // Reset the table.
+    /* Print active memory usage */
+    size_t mem_usage = dt_active_memory_usage(dt);
+    printf("Active memory usage: %zu bytes\n", mem_usage);
+
+    /* Reset the table */
     dt_reset(dt);
     printf("Table reset. Active capacity is now %u slots.\n", dt->current_capacity);
 
-    // Verify that previous keys have been removed.
-    if (dt_lookup(dt, 42, &found))
-        printf("After reset: key %u found with value %u (unexpected)\n", 42, found);
-    else
-        printf("After reset: key %u not found (expected)\n", 42);
+    /* Verify that previous keys have been removed */
+    {
+        my_value_t found;
+        if (dt_lookup(dt, &keys[0], &found))
+            printf("After reset: key %s found with value {data=%u, label=%s} (unexpected)\n",
+                   keys[0], found.data, found.label);
+        else
+            printf("After reset: key %s not found (expected)\n", keys[0]);
+    }
 
     dt_destroy(dt);
     return 0;
