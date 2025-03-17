@@ -1,244 +1,264 @@
-/* tp_dtable.h - single header generic implementation */
-#ifndef TP_DTABLE_H
-#define TP_DTABLE_H
+#ifndef TP_DT_H
+#define TP_DT_H
 
 #include <stdint.h>
 #include <stddef.h>
-#include <limits.h>
 
-/*-----------------------------------------------------------------------------
-    Public API
------------------------------------------------------------------------------*/
-
-/* dtable_t now stores keys and values of arbitrary types.
-   key_size and value_size are specified at creation.
+/* Public API for the dereference table (dt_t).
+   The implementation returns a tiny_ptr_t (fixed‐size pointer) that
+   encodes which internal table (primary/secondary) is used, plus bucket and slot.
 */
-typedef struct dtable_t {
-    uint32_t current_capacity;  /* Active number of slots (must be multiple of BUCKET_SIZE) */
-    uint32_t count;             /* Number of stored items */
-    uint32_t numBuckets;        /* Fixed number of buckets (current_capacity / BUCKET_SIZE) */
-    size_t key_size;            /* Size of each key */
-    size_t value_size;          /* Size of each value */
-    char    *keys;              /* Allocated as MAX_CAPACITY * key_size */
-    char    *values;            /* Allocated as MAX_CAPACITY * value_size */
-    uint8_t *bitmap;            /* One byte per bucket; each bit indicates occupancy */
-} dtable_t;
+typedef struct {
+    uint8_t table_id; // 0 = primary, 1 = secondary; 0xFF = failure
+    uint32_t bucket;
+    uint8_t slot;
+} tiny_ptr_t;
 
-/* Create a new table for keys of size key_size and values of size value_size.
-   Returns NULL on failure.
+typedef struct {
+    uint32_t num_buckets;       // number of buckets in this load-balancing table
+    uint32_t slots_per_bucket;  // bucket capacity
+    size_t key_size;            // size (in bytes) of each key
+    size_t value_size;          // size (in bytes) of each value
+    uint32_t current_capacity;  // active number of slots (always a multiple of slots_per_bucket)
+    char *keys;                 // pointer to keys array (allocated to MAX_CAPACITY * key_size bytes)
+    char *values;               // pointer to values array (allocated to MAX_CAPACITY * value_size bytes)
+    uint8_t *bitmap;            // occupancy bitmap (1 bit per slot, allocated to (MAX_CAPACITY+7)/8 bytes)
+} lb_table_t;
+
+/* dt_t holds two load-balancing tables:
+   - primary: designed for high load factor (approximately 1 - Θ(δ²))
+   - secondary: sparser (e.g. load factor ≈ 1 - Θ(1/ log log n))
 */
-dtable_t *dt_create(size_t key_size, size_t value_size);
+typedef struct dt_t {
+    lb_table_t *primary;
+    lb_table_t *secondary;
+} dt_t;
 
-/* Free all memory used by dt. */
-void dt_destroy(dtable_t *dt);
+/* Public functions */
+dt_t *dt_create(size_t key_size, size_t value_size);
+void dt_destroy(dt_t *dt);
 
-/* Reset dt to an empty state with active capacity INITIAL_CAPACITY.
-   Memory remains mapped.
-*/
-void dt_reset(dtable_t *dt);
+tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value);
+int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out);
+int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp);
 
-/* Insert a key/value pair into dt.
-   key and value are pointers to the key and value to store.
-   Returns a “tiny pointer” (the offset within the bucket) on success,
-   or UINT32_MAX on failure.
-*/
-uint32_t dt_insert(dtable_t *dt, const void *key, const void *value);
+#endif /* TP_DT_H */
 
-/* Look up key in dt.
-   If found, copies the associated value into value_out (if non-NULL) and returns nonzero.
-   Otherwise, returns 0.
-*/
-int dt_lookup(dtable_t *dt, const void *key, void *value_out);
-
-/* Delete key from dt.
-   Returns nonzero if key was found and deleted.
-*/
-int dt_delete(dtable_t *dt, const void *key);
-
-/* Return the active memory usage (in bytes) of dt (including metadata). */
-size_t dt_active_memory_usage(dtable_t *dt);
-
-/* A generic hash function; use as:
-      hash_key(key, sizeof(key))
-*/
-uint32_t hash_key(const void *key, size_t key_size);
-
-#endif /* TP_DTABLE_H */
-
-
-/*-----------------------------------------------------------------------------
-    IMPLEMENTATION
------------------------------------------------------------------------------*/
-#ifdef TP_DTABLE_IMPLEMENTATION
-
+#ifdef TP_DT_IMPLEMENTATION
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <string.h>
+#include <math.h>
 
-/* Configuration macros */
-#ifndef BUCKET_SIZE
-#define BUCKET_SIZE 8             /* Each bucket holds 8 slots */
-#endif
+/* Configuration macros.
+   - MAX_CAPACITY: the maximum number of slots allocated (fixed, via mmap)
+   - INITIAL_CAPACITY: the starting active capacity (in slots)
+   - DELTA: parameter controlling sparsity; here we set it as 1 / log(log(MAX_CAPACITY))
+     (guarded to be nonzero via fmax)
+   - PRIMARY_BUCKET_SIZE: chosen as Θ(δ⁻² log(1/δ))
+   - SECONDARY_BUCKET_SIZE: chosen as at least 1 (using fmax) and roughly log₂(log₂(MAX_CAPACITY))
+*/
+#define MAX_CAPACITY (1 << 20)
+#define INITIAL_CAPACITY (64)
+#define SAFE_LOG(x) ( (x) > 2 ? log(x) : 1.0 )
+#define DELTA (1.0 / (fmax(SAFE_LOG(SAFE_LOG(MAX_CAPACITY)), 1.0)))
+#define PRIMARY_BUCKET_SIZE ((uint32_t)fmax(4, 16 * (1.0 / (DELTA * DELTA)) * fmax(log(1.0 / DELTA), 1.0)))
+#define SECONDARY_BUCKET_SIZE ((uint32_t)fmax(2, log2(fmax(log2(MAX_CAPACITY), 2.0))))
 
-#ifndef INITIAL_CAPACITY
-#define INITIAL_CAPACITY 64       /* Initially active slots (must be multiple of BUCKET_SIZE) */
-#endif
+/*-------------------------------------------------------------------------
+   Internal Structures and Utility Functions
+-------------------------------------------------------------------------*/
 
-#ifndef MAX_CAPACITY
-#define MAX_CAPACITY (1 << 20)    /* Reserve space for up to 1M slots */
-#endif
-
-#ifndef LOAD_FACTOR_UPPER
-#define LOAD_FACTOR_UPPER 0.75    /* Not used directly; growth triggered when a bucket is full */
-#endif
-
-/*-----------------------------------------------------------------------------
-    Helper Functions
------------------------------------------------------------------------------*/
-
-/* A simple generic FNV‑1a hash function */
-uint32_t hash_key(const void *key, size_t key_size) {
-    const unsigned char *p = (const unsigned char *) key;
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < key_size; i++) {
+/* A simple FNV-1a hash function with a seed */
+static inline uint32_t hash_key(const void *key, size_t len, uint32_t seed) {
+    const unsigned char *p = key;
+    uint32_t hash = seed;
+    for (size_t i = 0; i < len; i++) {
         hash ^= p[i];
         hash *= 16777619;
     }
     return hash;
 }
 
-/* xmap() allocates memory using mmap */
+/* xmap uses mmap exclusively to allocate memory.
+   All allocations here come from mmap. */
 static inline void *xmap(size_t size) {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE,
                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     return (p == MAP_FAILED) ? NULL : p;
 }
 
-/* Helper: returns number of active slots per bucket based on current_capacity */
-static uint32_t active_slots(uint32_t current_capacity) {
-    uint32_t slots = (current_capacity * BUCKET_SIZE) / INITIAL_CAPACITY;
-    return (slots > BUCKET_SIZE) ? BUCKET_SIZE : slots;
+/* Bitmap helper macros (1 bit per slot) */
+#define BITMAP_TEST(bitmap, idx)   ((bitmap[(idx) / 8] >> ((idx) % 8)) & 1)
+#define BITMAP_SET(bitmap, idx)    (bitmap[(idx) / 8] |= (1 << ((idx) % 8)))
+#define BITMAP_CLEAR(bitmap, idx)  (bitmap[(idx) / 8] &= ~(1 << ((idx) % 8)))
+
+/*-------------------------------------------------------------------------
+   Load-Balancing Table (lb_table_t) Functions
+-------------------------------------------------------------------------*/
+
+/* lb_create allocates a new load-balancing table.
+   Note: the keys, values, and bitmap arrays are allocated with MAX_CAPACITY size
+   (so that future dynamic growth only adjusts t->current_capacity).
+   This design ensures that already allocated tiny pointers remain valid.
+*/
+static lb_table_t *lb_create(size_t key_size, size_t value_size,
+                             uint32_t slots_per_bucket, uint32_t initial_capacity) {
+    lb_table_t *t = xmap(sizeof(lb_table_t));
+    t->slots_per_bucket = slots_per_bucket;
+    t->num_buckets = fmax(1, initial_capacity / slots_per_bucket);
+    t->key_size = key_size;
+    t->value_size = value_size;
+    t->current_capacity = initial_capacity;
+    t->keys = xmap(MAX_CAPACITY * key_size);
+    t->values = xmap(MAX_CAPACITY * value_size);
+    t->bitmap = xmap((MAX_CAPACITY + 7) / 8);
+    return t;
 }
 
-/*-----------------------------------------------------------------------------
-    API Implementation
------------------------------------------------------------------------------*/
+/* lb_grow doubles the active capacity of the table, up to MAX_CAPACITY.
+   (Since memory was allocated for MAX_CAPACITY, we simply update current_capacity.)
+   This dynamic increase allows the table to absorb more allocations without rehashing old entries.
+*/
+static int lb_grow(lb_table_t *t) {
+    if (t->current_capacity >= MAX_CAPACITY) return 0;
+    t->current_capacity *= 2;
+    if (t->current_capacity > MAX_CAPACITY)
+        t->current_capacity = MAX_CAPACITY;
+    t->num_buckets = t->current_capacity / t->slots_per_bucket;
+    return 1;
+}
 
-dtable_t *dt_create(size_t key_size, size_t value_size) {
-    if (INITIAL_CAPACITY % BUCKET_SIZE != 0)
-        return NULL;
-    dtable_t *dt = xmap(sizeof(dtable_t));
-    if (!dt) return NULL;
-    dt->current_capacity = INITIAL_CAPACITY;
-    dt->count = 0;
-    dt->numBuckets = INITIAL_CAPACITY / BUCKET_SIZE;
-    dt->key_size = key_size;
-    dt->value_size = value_size;
-    
-    dt->keys = xmap(MAX_CAPACITY * key_size);
-    dt->values = xmap(MAX_CAPACITY * value_size);
-    dt->bitmap = xmap((MAX_CAPACITY / BUCKET_SIZE) * sizeof(uint8_t));
-    if (!dt->keys || !dt->values || !dt->bitmap) {
-        if (dt->keys) munmap(dt->keys, MAX_CAPACITY * key_size);
-        if (dt->values) munmap(dt->values, MAX_CAPACITY * value_size);
-        if (dt->bitmap) munmap(dt->bitmap, (MAX_CAPACITY / BUCKET_SIZE) * sizeof(uint8_t));
-        munmap(dt, sizeof(dtable_t));
-        return NULL;
+/* lb_insert attempts to insert a key/value pair into table t.
+   It hashes the key with the provided seed, chooses a bucket, and then linearly scans the bucket.
+   Returns 1 if insertion succeeds (and outputs bucket and slot used via pointers),
+   or 0 if the entire bucket is full (in which case the caller may attempt to grow t).
+*/
+static int lb_insert(lb_table_t *t, const void *key, const void *value,
+                     uint32_t seed, uint32_t *bucket_out, uint8_t *slot_out) {
+    uint32_t bucket = hash_key(key, t->key_size, seed) % t->num_buckets;
+    uint32_t base = bucket * t->slots_per_bucket;
+    for (uint32_t i = 0; i < t->slots_per_bucket; i++) {
+        uint32_t pos = base + i;
+        if (!BITMAP_TEST(t->bitmap, pos)) {
+            BITMAP_SET(t->bitmap, pos);
+            memcpy(t->keys + pos * t->key_size, key, t->key_size);
+            memcpy(t->values + pos * t->value_size, value, t->value_size);
+            *bucket_out = bucket;
+            *slot_out = (uint8_t)i;
+            return 1;
+        }
     }
-    /* mmap'd memory is zeroed */
+    return 0; // Insertion fails if bucket is full
+}
+
+/* lb_lookup and lb_delete perform key lookup and deletion, respectively, using the stored bucket and slot.
+   These functions assume that the caller provides the bucket and slot from the tiny pointer.
+*/
+static int lb_lookup(lb_table_t *t, const void *key, uint32_t bucket, uint8_t slot, void *value_out) {
+    uint32_t pos = bucket * t->slots_per_bucket + slot;
+    if (BITMAP_TEST(t->bitmap, pos)) {
+        if (memcmp(t->keys + pos * t->key_size, key, t->key_size) == 0) {
+            if (value_out)
+                memcpy(value_out, t->values + pos * t->value_size, t->value_size);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int lb_delete(lb_table_t *t, const void *key, uint32_t bucket, uint8_t slot) {
+    uint32_t pos = bucket * t->slots_per_bucket + slot;
+    if (BITMAP_TEST(t->bitmap, pos)) {
+        if (memcmp(t->keys + pos * t->key_size, key, t->key_size) == 0) {
+            BITMAP_CLEAR(t->bitmap, pos);
+            memset(t->keys + pos * t->key_size, 0, t->key_size);
+            memset(t->values + pos * t->value_size, 0, t->value_size);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*-------------------------------------------------------------------------
+   Dereference Table (dt_t) Functions
+-------------------------------------------------------------------------*/
+
+/* dt_create allocates two load-balancing tables:
+   - primary: uses PRIMARY_BUCKET_SIZE and starts at INITIAL_CAPACITY slots.
+   - secondary: uses SECONDARY_BUCKET_SIZE and also starts at INITIAL_CAPACITY.
+   (In a full implementation for variable-length tiny pointers, the value array could use zone aggregation.
+    Here, we use fixed-size tiny pointers, but dynamic resizing via doubling is supported.)
+*/
+dt_t *dt_create(size_t key_size, size_t value_size) {
+    dt_t *dt = xmap(sizeof(dt_t));
+    dt->primary = lb_create(key_size, value_size, PRIMARY_BUCKET_SIZE, INITIAL_CAPACITY);
+    dt->secondary = lb_create(key_size, value_size, SECONDARY_BUCKET_SIZE, INITIAL_CAPACITY);
     return dt;
 }
 
-void dt_destroy(dtable_t *dt) {
-    if (!dt) return;
-    munmap(dt->keys, MAX_CAPACITY * dt->key_size);
-    munmap(dt->values, MAX_CAPACITY * dt->value_size);
-    munmap(dt->bitmap, (MAX_CAPACITY / BUCKET_SIZE) * sizeof(uint8_t));
-    munmap(dt, sizeof(dtable_t));
+/* dt_destroy frees all memory using munmap.
+   (Since all allocations are from mmap, we unmap them here.)
+*/
+void dt_destroy(dt_t *dt) {
+    munmap(dt->primary->keys, MAX_CAPACITY * dt->primary->key_size);
+    munmap(dt->primary->values, MAX_CAPACITY * dt->primary->value_size);
+    munmap(dt->primary->bitmap, (MAX_CAPACITY + 7) / 8);
+    munmap(dt->primary, sizeof(lb_table_t));
+    munmap(dt->secondary->keys, MAX_CAPACITY * dt->secondary->key_size);
+    munmap(dt->secondary->values, MAX_CAPACITY * dt->secondary->value_size);
+    munmap(dt->secondary->bitmap, (MAX_CAPACITY + 7) / 8);
+    munmap(dt->secondary, sizeof(lb_table_t));
+    munmap(dt, sizeof(dt_t));
 }
 
-void dt_reset(dtable_t *dt) {
-    if (!dt) return;
-    dt->count = 0;
-    dt->current_capacity = INITIAL_CAPACITY;
-    memset(dt->keys, 0, MAX_CAPACITY * dt->key_size);
-    memset(dt->values, 0, MAX_CAPACITY * dt->value_size);
-    memset(dt->bitmap, 0, (MAX_CAPACITY / BUCKET_SIZE) * sizeof(uint8_t));
-}
-
-size_t dt_active_memory_usage(dtable_t *dt) {
-    size_t keys_usage   = dt->current_capacity * dt->key_size;
-    size_t values_usage = dt->current_capacity * dt->value_size;
-    size_t bitmap_usage = (dt->current_capacity / BUCKET_SIZE) * sizeof(uint8_t);
-    return sizeof(dtable_t) + keys_usage + values_usage + bitmap_usage;
-}
-
-uint32_t dt_insert(dtable_t *dt, const void *key, const void *value) {
-    uint32_t totalBuckets = MAX_CAPACITY / BUCKET_SIZE;
-    uint32_t hash = hash_key(key, dt->key_size);
-    uint32_t bucket = hash % totalBuckets;
-    uint32_t slots = active_slots(dt->current_capacity);
-    
-    for (uint32_t i = 0; i < slots; i++) {
-        uint32_t pos = bucket * BUCKET_SIZE + i;
-        if (!(dt->bitmap[bucket] & (1 << i))) {
-            dt->bitmap[bucket] |= (1 << i);
-            memcpy(dt->keys + pos * dt->key_size, key, dt->key_size);
-            memcpy(dt->values + pos * dt->value_size, value, dt->value_size);
-            dt->count++;
-            return i;  /* Tiny pointer: offset within bucket */
-        }
-    }
-    /* If active region full, double current_capacity (up to MAX_CAPACITY) and try again */
-    if (dt->current_capacity < MAX_CAPACITY) {
-        uint32_t new_capacity = dt->current_capacity * 2;
-        if (new_capacity > MAX_CAPACITY)
-            new_capacity = MAX_CAPACITY;
-        dt->current_capacity = new_capacity;
-        return dt_insert(dt, key, value);
-    }
-    return UINT32_MAX;  /* Table full */
-}
-
-int dt_lookup(dtable_t *dt, const void *key, void *value_out) {
-    uint32_t totalBuckets = MAX_CAPACITY / BUCKET_SIZE;
-    uint32_t hash = hash_key(key, dt->key_size);
-    uint32_t bucket = hash % totalBuckets;
-    uint32_t slots = active_slots(dt->current_capacity);
-    
-    for (uint32_t i = 0; i < slots; i++) {
-        uint32_t pos = bucket * BUCKET_SIZE + i;
-        if (dt->bitmap[bucket] & (1 << i)) {
-            if (memcmp(dt->keys + pos * dt->key_size, key, dt->key_size) == 0) {
-                if (value_out)
-                    memcpy(value_out, dt->values + pos * dt->value_size, dt->value_size);
-                return 1;
+/* dt_insert first attempts to insert into the primary table.
+   If insertion fails (bucket full), then it tries to grow the primary table.
+   If still failing, it attempts insertion (and growth) in the secondary table.
+   The returned tiny_ptr_t encodes which table was used plus the bucket and slot.
+   (In a more elaborate design, one could incorporate zone-aggregated storage for variable-length pointers.)
+*/
+tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value) {
+    tiny_ptr_t tp = {0};
+    if (!lb_insert(dt->primary, key, value, 0xABCDEF01, &tp.bucket, &tp.slot)) {
+        if (!lb_grow(dt->primary) ||
+            !lb_insert(dt->primary, key, value, 0xABCDEF01, &tp.bucket, &tp.slot)) {
+            if (!lb_insert(dt->secondary, key, value, 0x12345678, &tp.bucket, &tp.slot)) {
+                if (!lb_grow(dt->secondary) ||
+                    !lb_insert(dt->secondary, key, value, 0x12345678, &tp.bucket, &tp.slot)) {
+                    tp.table_id = 0xFF; // total failure
+                    return tp;
+                }
+                tp.table_id = 1;
+                return tp;
             }
+            tp.table_id = 1;
+            return tp;
         }
+        tp.table_id = 0;
+        return tp;
     }
+    tp.table_id = 0;
+    return tp;
+}
+
+/* dt_lookup and dt_delete use the table_id in the tiny_ptr_t to select the appropriate load-balancing table.
+*/
+int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out) {
+    if (tp.table_id == 0)
+        return lb_lookup(dt->primary, key, tp.bucket, tp.slot, value_out);
+    else if (tp.table_id == 1)
+        return lb_lookup(dt->secondary, key, tp.bucket, tp.slot, value_out);
     return 0;
 }
 
-int dt_delete(dtable_t *dt, const void *key) {
-    uint32_t totalBuckets = MAX_CAPACITY / BUCKET_SIZE;
-    uint32_t hash = hash_key(key, dt->key_size);
-    uint32_t bucket = hash % totalBuckets;
-    uint32_t slots = active_slots(dt->current_capacity);
-    
-    for (uint32_t i = 0; i < slots; i++) {
-        uint32_t pos = bucket * BUCKET_SIZE + i;
-        if (dt->bitmap[bucket] & (1 << i)) {
-            if (memcmp(dt->keys + pos * dt->key_size, key, dt->key_size) == 0) {
-                dt->bitmap[bucket] &= ~(1 << i);
-                memset(dt->keys + pos * dt->key_size, 0, dt->key_size);
-                memset(dt->values + pos * dt->value_size, 0, dt->value_size);
-                dt->count--;
-                return 1;
-            }
-        }
-    }
+int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp) {
+    if (tp.table_id == 0)
+        return lb_delete(dt->primary, key, tp.bucket, tp.slot);
+    else if (tp.table_id == 1)
+        return lb_delete(dt->secondary, key, tp.bucket, tp.slot);
     return 0;
 }
 
-#endif /* TP_DTABLE_IMPLEMENTATION */
+#endif /* TP_DT_IMPLEMENTATION */

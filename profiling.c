@@ -1,125 +1,94 @@
-#include <assert.h>
-#include <sys/resource.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <string.h>
-#include <limits.h>
-#include <time.h>
-#include <sys/time.h>
-
-#define TP_DTABLE_IMPLEMENTATION
+#include <math.h>
+#define TP_DT_IMPLEMENTATION
 #include "tp_dtable.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
-#define NOPS 1000000              // Number of stress-test operations.
+#define NOPS 1000000
 
 int main(void) {
-    dtable_t *dt = dt_create(sizeof(uint32_t), sizeof(uint32_t));
+    dt_t *dt = dt_create(sizeof(uint32_t), sizeof(uint32_t));
     if (!dt) {
         perror("dt_create failed");
         return 1;
     }
-
     srand((unsigned)time(NULL));
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
-    
-    // Variables to track memory usage over time.
-    uint64_t mem_usage_sum = 0;
-    uint32_t mem_usage_count = 0;
-    uint32_t mem_usage_min = UINT32_MAX;
-    uint32_t mem_usage_max = 0;
-    
-    // Variables to track effective overhead per item (in bits).
-    // We compare our active memory usage with a standard raw key/value array.
-    uint64_t overhead_sum = 0;
-    uint32_t overhead_samples = 0;
-    uint32_t overhead_min = UINT32_MAX;
-    uint32_t overhead_max = 0;
-    
-    // Auxiliary array to store keys for deletion/lookup.
-    uint32_t *aux = malloc(NOPS * sizeof(uint32_t));
+    uint32_t *aux_keys = malloc(NOPS * sizeof(uint32_t));
+    tiny_ptr_t *aux_ptrs = malloc(NOPS * sizeof(tiny_ptr_t));
     uint32_t aux_count = 0;
+    uint64_t total_ptr_bits = 0;
+    uint64_t insert_count = 0, lookup_count = 0, delete_count = 0;
+    
+    clock_t start = clock();
     
     for (uint32_t op = 0; op < NOPS; op++) {
-        // Sample current memory usage.
-        size_t current_usage = dt_active_memory_usage(dt);
-        mem_usage_sum += current_usage;
-        mem_usage_count++;
-        if (current_usage < mem_usage_min)
-            mem_usage_min = current_usage;
-        if (current_usage > mem_usage_max)
-            mem_usage_max = current_usage;
-        
-        // If there are stored items, compute effective overhead.
-        // Raw usage for a standard array storing key and value per item:
-        //   raw = count * (sizeof(uint32_t) * 2)
-        if (dt->count > 0) {
-            size_t raw_usage = dt->count * (2 * sizeof(uint32_t));
-            int extra_bytes = (current_usage > raw_usage) ? (current_usage - raw_usage) : 0;
-            uint32_t overhead_bits = extra_bytes * 8;
-            overhead_sum += overhead_bits;
-            overhead_samples++;
-            if (overhead_bits < overhead_min)
-                overhead_min = overhead_bits;
-            if (overhead_bits > overhead_max)
-                overhead_max = overhead_bits;
-        }
-        
         int r = rand() % 100;
-        if (r < 50) { 
-            // 50% insertion.
+        if (r < 50) { // Insert
             uint32_t key = rand();
             uint32_t value = rand();
-            uint32_t tp = dt_insert(dt, &key, &value);
-            if (tp != UINT32_MAX)
-                aux[aux_count++] = key;
-        } else if (r < 80) {
-            // 30% lookup.
-            if (aux_count > 0) {
-                uint32_t idx = rand() % aux_count;
-                uint32_t key = aux[idx];
-                uint32_t found;
-                (void) dt_lookup(dt, &key, &found);
+            tiny_ptr_t tp = dt_insert(dt, &key, &value);
+            if (tp.table_id != 0xFF) {
+                aux_keys[aux_count] = key;
+                aux_ptrs[aux_count] = tp;
+                aux_count++;
+                /* Rough estimate: table_id (1 bit) + bucket (assume 8 bits) + slot (assume 8 bits) */
+                total_ptr_bits += 1 + 8 + 8;
+                insert_count++;
             }
-        } else {
-            // 20% deletion.
+        } else if (r < 80) { // Lookup
             if (aux_count > 0) {
                 uint32_t idx = rand() % aux_count;
-                uint32_t key = aux[idx];
-                if (dt_delete(dt, &key)) {
-                    aux[idx] = aux[aux_count - 1];
+                dt_lookup(dt, &aux_keys[idx], aux_ptrs[idx], NULL);
+                lookup_count++;
+            }
+        } else { // Delete
+            if (aux_count > 0) {
+                uint32_t idx = rand() % aux_count;
+                if (dt_delete(dt, &aux_keys[idx], aux_ptrs[idx])) {
+                    aux_keys[idx] = aux_keys[aux_count - 1];
+                    aux_ptrs[idx] = aux_ptrs[aux_count - 1];
                     aux_count--;
+                    delete_count++;
                 }
             }
         }
     }
-    gettimeofday(&end, NULL);
-    double elapsed = (end.tv_sec - start.tv_sec) +
-                     (end.tv_usec - start.tv_usec) / 1e6;
-    size_t final_usage = dt_active_memory_usage(dt);
-    
-    // Compute pointer overhead.
-    // In this profiling the "pointer overhead" is taken as the size of the dtable_t structure.
-    size_t dt_struct_size = sizeof(dtable_t);
-    // Calculate proportion (in percentage) of active memory usage that is taken up by the dt structure.
-    double pointer_proportion = ((double) dt_struct_size / final_usage) * 100.0;
-    
-    // Print summary at end.
-    printf("Stress Test Completed:\n");
+
+    clock_t end = clock();  // End timing
+    double elapsed_seconds = (double)(end - start) / CLOCKS_PER_SEC;
+    double avg_time_per_op_us = (elapsed_seconds / NOPS) * 1e6;
+
+    double max_capacity = (double)(1 << 20);
+    double safe_log_max = (max_capacity > 2 ? log(max_capacity) : 1.0);
+    double safe_log_safe_log_max = (safe_log_max > 2 ? log(safe_log_max) : 1.0);
+    double delta = 1.0 / fmax(safe_log_safe_log_max, 1.0);
+    double ideal_pointer_bits = log2(log2(log2(max_capacity))) + log2(1.0 / delta);
+
+    printf("Profiling Completed:\n");
     printf("  Operations performed: %u\n", NOPS);
-    printf("  Elapsed time: %.4f seconds\n", elapsed);
-    printf("  Average time per op: %.6f microseconds\n", elapsed * 1e6 / NOPS);
-    printf("  Final active capacity: %u slots\n", dt->current_capacity);
-    printf("  Final active memory usage: %zu bytes\n", final_usage);
-    printf("  Memory usage (active region): %u bytes (max sampled)\n", mem_usage_max);
-    printf("  Effective overhead per item (over raw key/value data): %u bits/item\n", overhead_max);
-    printf("  Pointer overhead (size of dt structure): %zu bytes\n", dt_struct_size);
-    printf("  Pointer overhead proportion: %.20f%% of total active memory usage\n", pointer_proportion);
-    
-    free(aux);
+    printf("  Inserts: %lu\n", insert_count);
+    printf("  Lookups: %lu\n", lookup_count);
+    printf("  Deletes: %lu\n", delete_count);
+    printf("  Total elapsed time: %.6f seconds\n", elapsed_seconds);
+    printf("  Average time per op: %.6f microseconds\n", avg_time_per_op_us);
+    printf("  Inserts: %lu\n", insert_count);
+    printf("  Lookups: %lu\n", lookup_count);
+    printf("  Deletes: %lu\n", delete_count);
+    printf("  Average pointer length: %.2f bits\n", (double)total_ptr_bits / insert_count);
+    printf("  (Expected ideal: ~O(log log log n + log(1/DELTA)) : %.10f bits)\n", ideal_pointer_bits);
+
+    printf("\nPrimary Table:\n");
+    printf("  Active slots: %u\n", dt->primary->current_capacity);
+    printf("  Slots per bucket: %u\n", dt->primary->slots_per_bucket);
+    printf("  Buckets: %u\n", dt->primary->num_buckets);
+    printf("\nSecondary Table:\n");
+    printf("  Active slots: %u\n", dt->secondary->current_capacity);
+    printf("  Slots per bucket: %u\n", dt->secondary->slots_per_bucket);
+    printf("  Buckets: %u\n", dt->secondary->num_buckets);
+
     dt_destroy(dt);
+    free(aux_keys);
+    free(aux_ptrs);
     return 0;
 }

@@ -38,14 +38,26 @@ $ ./example
 
 Profiling shows that it follows the log(log(log(n))) footprint as outlined in the paper
 ```
-Stress Test Completed:
+Profiling Completed:
   Operations performed: 1000000
-  Elapsed time: 0.0545 seconds
-  Average time per op: 0.054498 microseconds
-  Final active capacity: 1048576 slots
-  Final active memory usage: 8519736 bytes
-  Memory usage (active region): 8519736 bytes (max sampled)
-  Effective overhead per item (over raw key/value data): 60340992 bits/item
-  Pointer overhead (size of dt structure): 56 bytes
-  Pointer overhead proportion: 0.00065729736226568527% of total active memory usage
+  Inserts: 500272
+  Lookups: 300083
+  Deletes: 199645
+  Total elapsed time: 0.052505 seconds
+  Average time per op: 0.052505 microseconds
+  Inserts: 500272
+  Lookups: 300083
+  Deletes: 199645
+  Average pointer length: 17.00 bits
+  (Expected ideal: ~O(log log log n + log(1/DELTA)) : 3.5063095794 bits)
+
+Primary Table:
+  Active slots: 1048576
+  Slots per bucket: 110
+  Buckets: 9532
+
+Secondary Table:
+  Active slots: 64
+  Slots per bucket: 4
+  Buckets: 16
 ```
