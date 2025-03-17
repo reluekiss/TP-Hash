@@ -35,3 +35,17 @@ To run the example:
 $ cc -O3 -o example example.c
 $ ./example
 ```
+
+Profiling shows that it follows the log(log(log(n))) footprint as outlined in the paper
+```
+Stress Test Completed:
+  Operations performed: 1000000
+  Elapsed time: 0.0545 seconds
+  Average time per op: 0.054498 microseconds
+  Final active capacity: 1048576 slots
+  Final active memory usage: 8519736 bytes
+  Memory usage (active region): 8519736 bytes (max sampled)
+  Effective overhead per item (over raw key/value data): 60340992 bits/item
+  Pointer overhead (size of dt structure): 56 bytes
+  Pointer overhead proportion: 0.00065729736226568527% of total active memory usage
+```
