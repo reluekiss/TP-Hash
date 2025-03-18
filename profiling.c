@@ -1,104 +1,85 @@
-#include <assert.h>
-#include <sys/resource.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <sys/mman.h>
-#include <unistd.h>
-#include <string.h>
-#include <limits.h>
 #include <time.h>
 #include <sys/time.h>
 
 #define TP_DTABLE_IMPLEMENTATION
 #include "tp_dtable.h"
 
-#define NOPS 1000000              // Number of stress-test operations.
+#define NOPS 10000000              // Number of stress-test operations.
+#define MAX_INSERTED_KEYS 10000000
+char *inserted_keys[MAX_INSERTED_KEYS];
+size_t inserted_count = 0;
+
+char* random_string(char* str, size_t length) {
+    static const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    if (str) {
+        for (size_t i = 0; i < length; i++) {
+            str[i] = charset[rand() % (sizeof(charset) - 1)];
+        }
+        str[length] = '\0';
+    }
+    return str;
+}
+
+typedef struct {
+    int num;
+    char* string;
+} my_type_t;
 
 int main(void) {
-    dtable_t *dt = dt_create(sizeof(uint32_t), sizeof(uint32_t));
+    dtable_t *dt = dt_create(sizeof(char*), sizeof(my_type_t));
     if (!dt) {
         perror("dt_create failed");
         return 1;
     }
-
     srand((unsigned)time(NULL));
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
+    uint64_t total_ptr_bits = 0;
+    my_type_t random, lookup;
+    char* lookup_key;
+    char* delete_key;
+    char str[16];
     
-    // Variables to track memory usage over time.
-    uint64_t mem_usage_sum = 0;
-    uint32_t mem_usage_count = 0;
-    uint32_t mem_usage_min = UINT32_MAX;
-    uint32_t mem_usage_max = 0;
-    
-    // Variables to track effective overhead per item (in bits).
-    // We compare our active memory usage with a standard raw key/value array.
-    uint64_t overhead_sum = 0;
-    uint32_t overhead_samples = 0;
-    uint32_t overhead_min = UINT32_MAX;
-    uint32_t overhead_max = 0;
-    
-    // Auxiliary array to store keys for deletion/lookup.
-    uint32_t *aux = malloc(NOPS * sizeof(uint32_t));
-    uint32_t aux_count = 0;
-    
+    clock_t start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
-        // Sample current memory usage.
-        size_t current_usage = dt_active_memory_usage(dt);
-        mem_usage_sum += current_usage;
-        mem_usage_count++;
-        if (current_usage < mem_usage_min)
-            mem_usage_min = current_usage;
-        if (current_usage > mem_usage_max)
-            mem_usage_max = current_usage;
-        
-        // If there are stored items, compute effective overhead.
-        // Raw usage for a standard array storing key and value per item:
-        //   raw = count * (sizeof(uint32_t) * 2)
-        if (dt->count > 0) {
-            size_t raw_usage = dt->count * (2 * sizeof(uint32_t));
-            int extra_bytes = (current_usage > raw_usage) ? (current_usage - raw_usage) : 0;
-            uint32_t overhead_bits = extra_bytes * 8;
-            overhead_sum += overhead_bits;
-            overhead_samples++;
-            if (overhead_bits < overhead_min)
-                overhead_min = overhead_bits;
-            if (overhead_bits > overhead_max)
-                overhead_max = overhead_bits;
-        }
-        
-        int r = rand() % 100;
-        if (r < 50) { 
-            // 50% insertion.
-            uint32_t key = rand();
-            uint32_t value = rand();
-            uint32_t tp = dt_insert(dt, &key, &value);
-            if (tp != UINT32_MAX)
-                aux[aux_count++] = key;
-        } else if (r < 80) {
-            // 30% lookup.
-            if (aux_count > 0) {
-                uint32_t idx = rand() % aux_count;
-                uint32_t key = aux[idx];
-                uint32_t found;
-                (void) dt_lookup(dt, &key, &found);
-            }
-        } else {
-            // 20% deletion.
-            if (aux_count > 0) {
-                uint32_t idx = rand() % aux_count;
-                uint32_t key = aux[idx];
-                if (dt_delete(dt, &key)) {
-                    aux[idx] = aux[aux_count - 1];
-                    aux_count--;
-                }
-            }
+        char* key = random_string(str, 10);
+        my_type_t value = { rand(), random_string(str, 15) };
+        uint32_t ret = dt_insert(dt, &key, &value);
+        if (ret != UINT32_MAX) {
+            inserted_keys[inserted_count++] = key;
         }
     }
-    gettimeofday(&end, NULL);
-    double elapsed = (end.tv_sec - start.tv_sec) +
-                     (end.tv_usec - start.tv_usec) / 1e6;
+    clock_t end = clock();  // End timing
+    double avg_time_per_insert = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
+
+    start = clock();
+    for (uint32_t op = 0; op < NOPS; op++) {
+        if (inserted_count > 0) {
+            lookup_key = inserted_keys[rand() % inserted_count];
+        }
+        if (dt_lookup(dt, lookup_key, &lookup)) {
+            fprintf(stderr, "failed to lookeup key: %s", lookup_key);
+        }
+    }
+    end = clock();  // End timing
+    double avg_time_per_lookup = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
+
+    start = clock();
+    for (uint32_t op = 0; op < NOPS; op++) {
+        if (inserted_count > 0) {
+            delete_key = inserted_keys[rand() % inserted_count];
+        }
+        if (dt_delete(dt, delete_key)) {
+            fprintf(stderr, "failed to lookeup key: %s", delete_key);
+        }
+    }
+    end = clock();  // End timing
+    double avg_time_per_delete = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
+
+    // for (int i = 0; i < dt->count; i++) {
+    //     dt->values[i].string;
+    // }
     size_t final_usage = dt_active_memory_usage(dt);
     
     // Compute pointer overhead.
@@ -110,16 +91,14 @@ int main(void) {
     // Print summary at end.
     printf("Stress Test Completed:\n");
     printf("  Operations performed: %u\n", NOPS);
-    printf("  Elapsed time: %.4f seconds\n", elapsed);
-    printf("  Average time per op: %.6f microseconds\n", elapsed * 1e6 / NOPS);
+    printf("  Average insert time per op: %.6f nanoseconds\n", avg_time_per_insert);
+    printf("  Average lookup time per op: %.6f nanoseconds\n", avg_time_per_lookup);
+    printf("  Average delete time per op: %.6f nanoseconds\n", avg_time_per_delete);
     printf("  Final active capacity: %u slots\n", dt->current_capacity);
     printf("  Final active memory usage: %zu bytes\n", final_usage);
-    printf("  Memory usage (active region): %u bytes (max sampled)\n", mem_usage_max);
-    printf("  Effective overhead per item (over raw key/value data): %u bits/item\n", overhead_max);
     printf("  Pointer overhead (size of dt structure): %zu bytes\n", dt_struct_size);
     printf("  Pointer overhead proportion: %.20f%% of total active memory usage\n", pointer_proportion);
     
-    free(aux);
     dt_destroy(dt);
     return 0;
 }

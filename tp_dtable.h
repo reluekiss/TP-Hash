@@ -1,4 +1,3 @@
-/* tp_dtable.h - single header generic implementation */
 #ifndef TP_DTABLE_H
 #define TP_DTABLE_H
 
@@ -87,10 +86,6 @@ uint32_t hash_key(const void *key, size_t key_size);
 
 #ifndef MAX_CAPACITY
 #define MAX_CAPACITY (1 << 20)    /* Reserve space for up to 1M slots */
-#endif
-
-#ifndef LOAD_FACTOR_UPPER
-#define LOAD_FACTOR_UPPER 0.75    /* Not used directly; growth triggered when a bucket is full */
 #endif
 
 /*-----------------------------------------------------------------------------
