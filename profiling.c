@@ -60,6 +60,7 @@ int main(void) {
     uint64_t insert_count = 0, lookup_count = 0, delete_count = 0, reset_count = 0;
     int err;
     my_type_t random, lookup;
+    tiny_ptr_t tp;
     
     clock_t start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
@@ -68,25 +69,26 @@ int main(void) {
         if (r < 500) { // Insert
             char* key = random_string(10);
             my_type_t value = { rand(), random_string(15) };
-            err = dt_insert(dt, &key, &value);
-            if (!err) {
-                fprintf(stderr, "failed to insert value\n");
-            }
+            tp = dt_insert(dt, &key, &value);
+            // if (!err) {
+            //     fprintf(stderr, "failed to insert value\n");
+            // }
             insert_count++;
         } else if (r < 800) { // Lookup
-            err = dt_lookup(dt, &lookup_key, &lookup);
+            err = dt_lookup(dt, &lookup_key, tp, &lookup);
             if (err) {
                 fprintf(stderr, "failed to lookup value\n");
             }
             lookup_count++;
         } else if (r < 999) { // Delete
-            err = dt_delete(dt, &lookup_key);
+            err = dt_delete(dt, &lookup_key, tp);
             if (err) {
                 fprintf(stderr, "failed to delete value\n");
             }
             delete_count++;
         } else {
             dt_reset(dt);
+            reset_count++;
         }
     }
 
@@ -102,15 +104,12 @@ int main(void) {
 
     printf("Profiling Completed:\n");
     printf("  Operations performed: %u\n", NOPS);
-    printf("  Inserts: %lu\n", insert_count);
-    printf("  Lookups: %lu\n", lookup_count);
-    printf("  Deletes: %lu\n", delete_count);
     printf("  Total elapsed time: %.6f seconds\n", elapsed_seconds);
     printf("  Average time per op: %.6f microseconds\n", avg_time_per_op_us);
     printf("  Inserts: %lu\n", insert_count);
     printf("  Lookups: %lu\n", lookup_count);
     printf("  Deletes: %lu\n", delete_count);
-    printf("  Average pointer length: %.2f bits\n", (double)total_ptr_bits / insert_count);
+    // printf("  Average pointer length: %.2f bits\n", (double)tp.bucket / insert_count);
     printf("  (Expected ideal: ~O(log log log n + log(1/DELTA)) : %.10f bits)\n", ideal_pointer_bits);
 
     printf("\nPrimary Table:\n");
