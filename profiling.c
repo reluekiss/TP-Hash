@@ -72,16 +72,19 @@ int main(void) {
             if (!err) {
                 fprintf(stderr, "failed to insert value\n");
             }
+            insert_count++;
         } else if (r < 800) { // Lookup
             err = dt_lookup(dt, &lookup_key, &lookup);
             if (err) {
                 fprintf(stderr, "failed to lookup value\n");
             }
+            lookup_count++;
         } else if (r < 999) { // Delete
             err = dt_delete(dt, &lookup_key);
             if (err) {
                 fprintf(stderr, "failed to delete value\n");
             }
+            delete_count++;
         } else {
             dt_reset(dt);
         }
