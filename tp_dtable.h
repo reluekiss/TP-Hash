@@ -19,7 +19,7 @@ typedef struct {
     uint32_t slots_per_bucket;  // bucket capacity
     size_t key_size;            // size (in bytes) of each key
     size_t value_size;          // size (in bytes) of each value
-    uint32_t current_capacity;  // active number of slots (always a multiple of slots_per_bucket)
+    uint32_t count;             // active number of slots (always a multiple of slots_per_bucket)
     char *keys;                 // pointer to keys array (allocated to MAX_CAPACITY * key_size bytes)
     char *values;               // pointer to values array (allocated to MAX_CAPACITY * value_size bytes)
     uint8_t *bitmap;            // occupancy bitmap (1 bit per slot, allocated to (MAX_CAPACITY+7)/8 bytes)
@@ -38,9 +38,9 @@ typedef struct dt_t {
 dt_t *dt_create(size_t key_size, size_t value_size);
 void dt_destroy(dt_t *dt);
 
-tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value);
-int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out);
-int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp);
+int dt_insert(dt_t *dt, const void *key, const void *value);
+int dt_lookup(dt_t *dt, const void *key, void *value_out);
+int dt_delete(dt_t *dt, const void *key);
 void dt_reset(dt_t *dt);
 
 #endif /* TP_DT_H */
@@ -101,7 +101,7 @@ static inline void *xmap(size_t size) {
 
 /* lb_create allocates a new load-balancing table.
    Note: the keys, values, and bitmap arrays are allocated with MAX_CAPACITY size
-   (so that future dynamic growth only adjusts t->current_capacity).
+   (so that future dynamic growth only adjusts t->count).
    This design ensures that already allocated tiny pointers remain valid.
 */
 static lb_table_t *lb_create(size_t key_size, size_t value_size,
@@ -111,7 +111,7 @@ static lb_table_t *lb_create(size_t key_size, size_t value_size,
     t->num_buckets = fmax(1, initial_capacity / slots_per_bucket);
     t->key_size = key_size;
     t->value_size = value_size;
-    t->current_capacity = initial_capacity;
+    t->count = initial_capacity;
     t->keys = xmap(MAX_CAPACITY * key_size);
     t->values = xmap(MAX_CAPACITY * value_size);
     t->bitmap = xmap((MAX_CAPACITY + 7) / 8);
@@ -119,15 +119,15 @@ static lb_table_t *lb_create(size_t key_size, size_t value_size,
 }
 
 /* lb_grow doubles the active capacity of the table, up to MAX_CAPACITY.
-   (Since memory was allocated for MAX_CAPACITY, we simply update current_capacity.)
+   (Since memory was allocated for MAX_CAPACITY, we simply update count.)
    This dynamic increase allows the table to absorb more allocations without rehashing old entries.
 */
 static int lb_grow(lb_table_t *t) {
-    if (t->current_capacity >= MAX_CAPACITY) return 0;
-    t->current_capacity *= 2;
-    if (t->current_capacity > MAX_CAPACITY)
-        t->current_capacity = MAX_CAPACITY;
-    t->num_buckets = t->current_capacity / t->slots_per_bucket;
+    if (t->count >= MAX_CAPACITY) return 0;
+    t->count *= 2;
+    if (t->count > MAX_CAPACITY)
+        t->count = MAX_CAPACITY;
+    t->num_buckets = t->count / t->slots_per_bucket;
     return 1;
 }
 
@@ -152,34 +152,6 @@ static int lb_insert(lb_table_t *t, const void *key, const void *value,
         }
     }
     return 0; // Insertion fails if bucket is full
-}
-
-/* lb_lookup and lb_delete perform key lookup and deletion, respectively, using the stored bucket and slot.
-   These functions assume that the caller provides the bucket and slot from the tiny pointer.
-*/
-static int lb_lookup(lb_table_t *t, const void *key, uint32_t bucket, uint8_t slot, void *value_out) {
-    uint32_t pos = bucket * t->slots_per_bucket + slot;
-    if (BITMAP_TEST(t->bitmap, pos)) {
-        if (memcmp(t->keys + pos * t->key_size, key, t->key_size) == 0) {
-            if (value_out)
-                memcpy(value_out, t->values + pos * t->value_size, t->value_size);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int lb_delete(lb_table_t *t, const void *key, uint32_t bucket, uint8_t slot) {
-    uint32_t pos = bucket * t->slots_per_bucket + slot;
-    if (BITMAP_TEST(t->bitmap, pos)) {
-        if (memcmp(t->keys + pos * t->key_size, key, t->key_size) == 0) {
-            BITMAP_CLEAR(t->bitmap, pos);
-            memset(t->keys + pos * t->key_size, 0, t->key_size);
-            memset(t->values + pos * t->value_size, 0, t->value_size);
-            return 1;
-        }
-    }
-    return 0;
 }
 
 /*-------------------------------------------------------------------------
@@ -220,58 +192,90 @@ void dt_destroy(dt_t *dt) {
    The returned tiny_ptr_t encodes which table was used plus the bucket and slot.
    (In a more elaborate design, one could incorporate zone-aggregated storage for variable-length pointers.)
 */
-tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value) {
-    tiny_ptr_t tp = {0};
-    if (!lb_insert(dt->primary, key, value, 0xABCDEF01, &tp.bucket, &tp.slot)) {
-        if (!lb_grow(dt->primary) ||
-            !lb_insert(dt->primary, key, value, 0xABCDEF01, &tp.bucket, &tp.slot)) {
-            if (!lb_insert(dt->secondary, key, value, 0x12345678, &tp.bucket, &tp.slot)) {
-                if (!lb_grow(dt->secondary) ||
-                    !lb_insert(dt->secondary, key, value, 0x12345678, &tp.bucket, &tp.slot)) {
-                    tp.table_id = 0xFF; // total failure
-                    return tp;
-                }
-                tp.table_id = 1;
-                return tp;
-            }
-            tp.table_id = 1;
-            return tp;
+int dt_insert(dt_t *dt, const void *key, const void *value) {
+    uint32_t bucket;
+    uint8_t slot;
+    if (lb_insert(dt->primary, key, value, 0xABCDEF01, &bucket, &slot))
+        return 1;
+    if (!lb_grow(dt->primary) ||
+        !lb_insert(dt->primary, key, value, 0xABCDEF01, &bucket, &slot)) {
+        if (!lb_insert(dt->secondary, key, value, 0x12345678, &bucket, &slot)) {
+            if (!lb_grow(dt->secondary) ||
+                !lb_insert(dt->secondary, key, value, 0x12345678, &bucket, &slot))
+                return 0;
         }
-        tp.table_id = 0;
-        return tp;
     }
-    tp.table_id = 0;
-    return tp;
+    return 1;
 }
 
 /* dt_lookup and dt_delete use the table_id in the tiny_ptr_t to select the appropriate load-balancing table.
 */
-int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out) {
-    if (tp.table_id == 0)
-        return lb_lookup(dt->primary, key, tp.bucket, tp.slot, value_out);
-    else if (tp.table_id == 1)
-        return lb_lookup(dt->secondary, key, tp.bucket, tp.slot, value_out);
+int dt_lookup(dt_t *dt, const void *key, void *value_out) {
+    uint32_t bucket = hash_key(key, dt->primary->key_size, 0xABCDEF01) % dt->primary->num_buckets;
+    uint32_t base = bucket * dt->primary->slots_per_bucket;
+    for (uint32_t i = 0; i < dt->primary->slots_per_bucket; i++) {
+        uint32_t pos = base + i;
+        if (BITMAP_TEST(dt->primary->bitmap, pos) &&
+            memcmp(dt->primary->keys + pos * dt->primary->key_size, key, dt->primary->key_size) == 0) {
+            if (value_out)
+                memcpy(value_out, dt->primary->values + pos * dt->primary->value_size,
+                       dt->primary->value_size);
+            return 1;
+        }
+    }
+    bucket = hash_key(key, dt->secondary->key_size, 0x12345678) % dt->secondary->num_buckets;
+    base = bucket * dt->secondary->slots_per_bucket;
+    for (uint32_t i = 0; i < dt->secondary->slots_per_bucket; i++) {
+        uint32_t pos = base + i;
+        if (BITMAP_TEST(dt->secondary->bitmap, pos) &&
+            memcmp(dt->secondary->keys + pos * dt->secondary->key_size, key, dt->secondary->key_size) == 0) {
+            if (value_out)
+                memcpy(value_out, dt->secondary->values + pos * dt->secondary->value_size,
+                       dt->secondary->value_size);
+            return 1;
+        }
+    }
     return 0;
 }
 
-int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp) {
-    if (tp.table_id == 0)
-        return lb_delete(dt->primary, key, tp.bucket, tp.slot);
-    else if (tp.table_id == 1)
-        return lb_delete(dt->secondary, key, tp.bucket, tp.slot);
+int dt_delete(dt_t *dt, const void *key) {
+    uint32_t bucket = hash_key(key, dt->primary->key_size, 0xABCDEF01) % dt->primary->num_buckets;
+    uint32_t base = bucket * dt->primary->slots_per_bucket;
+    for (uint32_t i = 0; i < dt->primary->slots_per_bucket; i++) {
+        uint32_t pos = base + i;
+        if (BITMAP_TEST(dt->primary->bitmap, pos) &&
+            memcmp(dt->primary->keys + pos * dt->primary->key_size, key, dt->primary->key_size) == 0) {
+            BITMAP_CLEAR(dt->primary->bitmap, pos);
+            memset(dt->primary->keys + pos * dt->primary->key_size, 0, dt->primary->key_size);
+            memset(dt->primary->values + pos * dt->primary->value_size, 0, dt->primary->value_size);
+            return 1;
+        }
+    }
+    bucket = hash_key(key, dt->secondary->key_size, 0x12345678) % dt->secondary->num_buckets;
+    base = bucket * dt->secondary->slots_per_bucket;
+    for (uint32_t i = 0; i < dt->secondary->slots_per_bucket; i++) {
+        uint32_t pos = base + i;
+        if (BITMAP_TEST(dt->secondary->bitmap, pos) &&
+            memcmp(dt->secondary->keys + pos * dt->secondary->key_size, key, dt->secondary->key_size) == 0) {
+            BITMAP_CLEAR(dt->secondary->bitmap, pos);
+            memset(dt->secondary->keys + pos * dt->secondary->key_size, 0, dt->secondary->key_size);
+            memset(dt->secondary->values + pos * dt->secondary->value_size, 0, dt->secondary->value_size);
+            return 1;
+        }
+    }
     return 0;
 }
 
 void dt_reset(dt_t *dt) {
     lb_table_t *t = dt->primary;
-    t->current_capacity = INITIAL_CAPACITY;
+    t->count = INITIAL_CAPACITY;
     t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
     memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
     memset(t->keys, 0, MAX_CAPACITY * t->key_size);
     memset(t->values, 0, MAX_CAPACITY * t->value_size);
 
     t = dt->secondary;
-    t->current_capacity = INITIAL_CAPACITY;
+    t->count = INITIAL_CAPACITY;
     t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
     memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
     memset(t->keys, 0, MAX_CAPACITY * t->key_size);

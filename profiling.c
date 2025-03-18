@@ -32,48 +32,55 @@ static inline uint32_t dt_total_ptr_bits(void) {
     return (primary_total > secondary_total) ? primary_total : secondary_total;
 }
 
+char* random_string(size_t length) {
+    static const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    char *str = malloc(length + 1);
+    if (str) {
+        for (size_t i = 0; i < length; i++) {
+            str[i] = charset[rand() % (sizeof(charset) - 1)];
+        }
+        str[length] = '\0';
+    }
+    return str;
+}
+
+typedef struct {
+    int num;
+    char* string;
+} my_type_t;
+
 int main(void) {
-    dt_t *dt = dt_create(sizeof(uint32_t), sizeof(uint32_t));
+    dt_t *dt = dt_create(sizeof(char*), sizeof(my_type_t));
     if (!dt) {
         perror("dt_create failed");
         return 1;
     }
     srand((unsigned)time(NULL));
-    uint32_t *aux_keys = malloc(NOPS * sizeof(uint32_t));
-    tiny_ptr_t *aux_ptrs = malloc(NOPS * sizeof(tiny_ptr_t));
-    uint32_t aux_count = 0;
     uint64_t total_ptr_bits = 0;
-    uint64_t insert_count = 0, lookup_count = 0, delete_count = 0;
+    uint64_t insert_count = 0, lookup_count = 0, delete_count = 0, reset_count = 0;
+    int err;
+    my_type_t random, lookup;
     
     clock_t start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
         int r = rand() % 1000;
+        char *lookup_key = dt->primary->keys + (rand() % dt->primary->count) * dt->primary->key_size;
         if (r < 500) { // Insert
-            uint32_t key = rand();
-            uint32_t value = rand();
-            tiny_ptr_t tp = dt_insert(dt, &key, &value);
-            if (tp.table_id != 0xFF) {
-                aux_keys[aux_count] = key;
-                aux_ptrs[aux_count] = tp;
-                aux_count++;
-                total_ptr_bits += dt_total_ptr_bits();
-                insert_count++;
+            char* key = random_string(10);
+            my_type_t value = { rand(), random_string(15) };
+            err = dt_insert(dt, &key, &value);
+            if (!err) {
+                fprintf(stderr, "failed to insert value\n");
             }
         } else if (r < 800) { // Lookup
-            if (aux_count > 0) {
-                uint32_t idx = rand() % aux_count;
-                dt_lookup(dt, &aux_keys[idx], aux_ptrs[idx], NULL);
-                lookup_count++;
+            err = dt_lookup(dt, &lookup_key, &lookup);
+            if (err) {
+                fprintf(stderr, "failed to lookup value\n");
             }
         } else if (r < 999) { // Delete
-            if (aux_count > 0) {
-                uint32_t idx = rand() % aux_count;
-                if (dt_delete(dt, &aux_keys[idx], aux_ptrs[idx])) {
-                    aux_keys[idx] = aux_keys[aux_count - 1];
-                    aux_ptrs[idx] = aux_ptrs[aux_count - 1];
-                    aux_count--;
-                    delete_count++;
-                }
+            err = dt_delete(dt, &lookup_key);
+            if (err) {
+                fprintf(stderr, "failed to delete value\n");
             }
         } else {
             dt_reset(dt);
@@ -104,16 +111,14 @@ int main(void) {
     printf("  (Expected ideal: ~O(log log log n + log(1/DELTA)) : %.10f bits)\n", ideal_pointer_bits);
 
     printf("\nPrimary Table:\n");
-    printf("  Active slots: %u\n", dt->primary->current_capacity);
+    printf("  Active slots: %u\n", dt->primary->count);
     printf("  Slots per bucket: %u\n", dt->primary->slots_per_bucket);
     printf("  Buckets: %u\n", dt->primary->num_buckets);
     printf("\nSecondary Table:\n");
-    printf("  Active slots: %u\n", dt->secondary->current_capacity);
+    printf("  Active slots: %u\n", dt->secondary->count);
     printf("  Slots per bucket: %u\n", dt->secondary->slots_per_bucket);
     printf("  Buckets: %u\n", dt->secondary->num_buckets);
 
     dt_destroy(dt);
-    free(aux_keys);
-    free(aux_ptrs);
     return 0;
 }
