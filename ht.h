@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 #define INITIAL_CAPACITY 8
 #define LOAD_FACTOR 0.5
@@ -20,12 +21,13 @@ typedef struct {
     Entry *entries; // contiguous array of capacity entries
 } HashTable;
 
-void ht_init(HashTable *ht, size_t key_size, size_t value_size);
-void ht_insert(HashTable *ht, const void *key, const void *value);
-void ht_resize(HashTable *ht, size_t new_capacity);
+int ht_init(HashTable *ht, size_t key_size, size_t value_size);
+int ht_insert(HashTable *ht, const void *key, const void *value);
+int ht_resize(HashTable *ht, size_t new_capacity);
 void *ht_find(HashTable *ht, const void *key);
-void ht_delete(HashTable *ht, const void *key);
-void ht_destroy(HashTable *ht);
+int ht_delete(HashTable *ht, const void *key);
+int ht_destroy(HashTable *ht);
+int ht_reset(HashTable *ht);
 
 #endif /* HT_H */
 
@@ -68,27 +70,6 @@ static size_t next_power_of_two(size_t n) {
     return p;
 }
 
-/* Initialize the table with a requested initial capacity (will be rounded up) */
-void ht_init(HashTable *ht, size_t key_size, size_t value_size) {
-    ht->key_size = key_size;
-    ht->value_size = value_size;
-    ht->capacity = next_power_of_two(INITIAL_CAPACITY);
-    ht->size = 0;
-    size_t es = entry_size(ht);
-    ht->entries = malloc(ht->capacity * es);
-    for (size_t i = 0; i < ht->capacity; i++) {
-        Entry *e = (Entry *)((char*)ht->entries + i * es);
-        e->dist = -1;
-    }
-}
-
-/* Free table resources */
-void ht_destroy(HashTable *ht) {
-    free(ht->entries);
-    ht->entries = NULL;
-    ht->capacity = ht->size = 0;
-}
-
 /* Internal reinsertion routine used during resizing.
    Copies the key and value from a given entry into the new table. */
 static void ht_reinsert(HashTable *ht, const void *key, const void *value) {
@@ -96,7 +77,6 @@ static void ht_reinsert(HashTable *ht, const void *key, const void *value) {
     uint32_t hash = fnv1(key, ht->key_size);
     size_t idx = hash & (ht->capacity - 1);
     int probe = 0;
-    /* Use variable-length arrays for temporary key/value buffers */
     char key_buf[ht->key_size], value_buf[ht->value_size];
     memcpy(key_buf, key, ht->key_size);
     memcpy(value_buf, value, ht->value_size);
@@ -114,7 +94,6 @@ static void ht_reinsert(HashTable *ht, const void *key, const void *value) {
             return;
         }
         if (e->dist < probe) {
-            /* Swap our temporary buffers with e’s stored key/value */
             int tmp_dist = e->dist;
             char temp_key[ht->key_size], temp_value[ht->value_size];
             memcpy(temp_key, entry_key(e, ht->key_size), ht->key_size);
@@ -131,8 +110,47 @@ static void ht_reinsert(HashTable *ht, const void *key, const void *value) {
     }
 }
 
+/* Initialize the table with a requested initial capacity (will be rounded up) */
+int ht_init(HashTable *ht, size_t key_size, size_t value_size) {
+    ht->key_size = key_size;
+    ht->value_size = value_size;
+    ht->capacity = next_power_of_two(INITIAL_CAPACITY);
+    ht->size = 0;
+    size_t es = entry_size(ht);
+    ht->entries = malloc(ht->capacity * es);
+    if (!ht->entries)
+        return 1;
+    for (size_t i = 0; i < ht->capacity; i++) {
+        Entry *e = (Entry *)((char*)ht->entries + i * es);
+        e->dist = -1;
+    }
+    return 0;
+}
+
+/* Free table resources */
+int ht_destroy(HashTable *ht) {
+    free(ht->entries);
+    ht->entries = NULL;
+    ht->capacity = ht->size = 0;
+    return 0;
+}
+
+/* Reset table: zeros out everything */
+int ht_reset(HashTable *ht) {
+    if (!ht || !ht->entries)
+        return 1;
+    size_t es = entry_size(ht);
+    memset(ht->entries, 0, ht->capacity * es);
+    for (size_t i = 0; i < ht->capacity; i++) {
+        Entry *e = (Entry *)((char*)ht->entries + i * es);
+        e->dist = -1;
+    }
+    ht->size = 0;
+    return 0;
+}
+
 /* Resize table to new_capacity and reinsert all entries */
-void ht_resize(HashTable *ht, size_t new_capacity) {
+int ht_resize(HashTable *ht, size_t new_capacity) {
     size_t old_capacity = ht->capacity;
     size_t es_old = entry_size(ht);
     Entry *old_entries = ht->entries;
@@ -141,11 +159,15 @@ void ht_resize(HashTable *ht, size_t new_capacity) {
     ht->size = 0;
     size_t es = entry_size(ht);
     ht->entries = malloc(ht->capacity * es);
+    if (!ht->entries) {
+        ht->entries = old_entries;
+        ht->capacity = old_capacity;
+        return 1;
+    }
     for (size_t i = 0; i < ht->capacity; i++) {
         Entry *e = (Entry *)((char*)ht->entries + i * es);
         e->dist = -1;
     }
-    /* Reinsert every nonempty entry from old table */
     for (size_t i = 0; i < old_capacity; i++) {
         Entry *e = (Entry *)((char*)old_entries + i * es_old);
         if (e->dist >= 0) {
@@ -153,13 +175,15 @@ void ht_resize(HashTable *ht, size_t new_capacity) {
         }
     }
     free(old_entries);
+    return 0;
 }
 
 /* Insert key/value pair into the table.
    If key already exists its value is updated. */
-void ht_insert(HashTable *ht, const void *key, const void *value) {
+int ht_insert(HashTable *ht, const void *key, const void *value) {
     if ((double)(ht->size + 1) > ht->capacity * LOAD_FACTOR)
-        ht_resize(ht, ht->capacity * 2);
+        if (ht_resize(ht, ht->capacity * 2))
+            return 1;
     size_t es = entry_size(ht);
     uint32_t hash = fnv1(key, ht->key_size);
     size_t idx = hash & (ht->capacity - 1);
@@ -174,11 +198,11 @@ void ht_insert(HashTable *ht, const void *key, const void *value) {
             memcpy(entry_key(e, ht->key_size), key_buf, ht->key_size);
             memcpy(entry_value(e, ht->key_size), value_buf, ht->value_size);
             ht->size++;
-            return;
+            return 0;
         }
         if (memcmp(entry_key(e, ht->key_size), key_buf, ht->key_size) == 0) {
             memcpy(entry_value(e, ht->key_size), value_buf, ht->value_size);
-            return;
+            return 0;
         }
         if (e->dist < probe) {
             int tmp_dist = e->dist;
@@ -215,7 +239,7 @@ void *ht_find(HashTable *ht, const void *key) {
 }
 
 /* Delete a key from the table */
-void ht_delete(HashTable *ht, const void *key) {
+int ht_delete(HashTable *ht, const void *key) {
     size_t es = entry_size(ht);
     uint32_t hash = fnv1(key, ht->key_size);
     size_t idx = hash & (ht->capacity - 1);
@@ -223,7 +247,7 @@ void ht_delete(HashTable *ht, const void *key) {
     while (1) {
         Entry *e = (Entry *)((char*)ht->entries + idx * es);
         if (e->dist == -1 || probe > e->dist)
-            return; // not found
+            return 0; // key not found is not an error
         if (memcmp(entry_key(e, ht->key_size), key, ht->key_size) == 0) {
             e->dist = -1;
             ht->size--;
@@ -239,7 +263,7 @@ void ht_delete(HashTable *ht, const void *key) {
                 next = (next + 1) & (ht->capacity - 1);
             }
             ((Entry *)((char*)ht->entries + hole * es))->dist = -1;
-            return;
+            return 0;
         }
         idx = (idx + 1) & (ht->capacity - 1);
         probe++;
