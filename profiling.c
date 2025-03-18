@@ -31,7 +31,8 @@ char* random_string(size_t length) {
 }
 
 typedef struct {
-    int num;
+    float num;
+    int num2;
     char *string;
 } my_type_t;
 
@@ -47,7 +48,7 @@ int main(void) {
     my_type_t lookup_val;
     char *lookup_key, *delete_key;
 
-    /* // --- DTable Profiling ---
+    // --- DTable Profiling ---
     dtable_t *dt = dt_create(sizeof(char*), sizeof(my_type_t));
     if (!dt) { perror("dt_create failed"); return 1; }
     start = clock();
@@ -120,44 +121,46 @@ int main(void) {
     printf("  Avg lookup: %.6f ns\n", avg_time_lookup);
     printf("  Avg delete: %.6f ns\n", avg_time_delete);
     printf("  Final element count: %td\n", hmlen(stb_map));
-    hmfree(stb_map); */
+    hmfree(stb_map);
     
     // --- Generic Hash Table Profiling ---
     // Using the improved dt-style generic hash table (ht_t)
     HashTable *ght = malloc(sizeof(HashTable));
     if (!ght) { perror("malloc failed"); return 1; }
     if (!ght) { perror("ht_create failed"); return 1; }
-    start = clock();
+    clock_t op_start, op_end;
+    double total_insert = 0.0, total_lookup = 0.0, total_delete = 0.0;
+    
     for (uint32_t op = 0; op < NOPS; op++) {
         char *key = random_string(10);
-        my_type_t value = { rand(), random_string(15) };
-        // Pass key directly (not its address)
+        my_type_t value = { rand(), rand(), random_string(15) };
+        op_start = clock();
         ht_insert(ght, key, &value);
+        op_end = clock();
+        total_insert += ((double)(op_end - op_start) / CLOCKS_PER_SEC) * 1e9;
         inserted_keys_generic[inserted_count_generic++] = key;
     }
-    end = clock();
-    avg_time_insert = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
     
-    start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
-        if (inserted_count_generic)
-            lookup_key = inserted_keys_generic[rand() % inserted_count_generic];
-        // Pass lookup_key directly (not its address)
+        const char *lookup_key = inserted_count_generic ? inserted_keys_generic[rand() % inserted_count_generic] : NULL;
+        op_start = clock();
         if (!ht_find(ght, lookup_key))
             fprintf(stderr, "failed to lookup key: %s\n", lookup_key);
+        op_end = clock();
+        total_lookup += ((double)(op_end - op_start) / CLOCKS_PER_SEC) * 1e9;
     }
-    end = clock();
-    avg_time_lookup = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
     
-    start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
-        if (inserted_count_generic)
-            delete_key = inserted_keys_generic[rand() % inserted_count_generic];
-        // Pass delete_key directly (not its address)
+        const char *delete_key = inserted_count_generic ? inserted_keys_generic[rand() % inserted_count_generic] : NULL;
+        op_start = clock();
         ht_delete(ght, delete_key);
+        op_end = clock();
+        total_delete += ((double)(op_end - op_start) / CLOCKS_PER_SEC) * 1e9;
     }
-    end = clock();
-    avg_time_delete = ((double)(end - start) / CLOCKS_PER_SEC / NOPS) * 1e9;
+    
+    avg_time_insert = total_insert / NOPS;
+    avg_time_lookup = total_lookup / NOPS;
+    avg_time_delete = total_delete / NOPS;
     
     printf("Generic Hash Table Stress Test Completed:\n");
     printf("  Avg insert: %.6f ns\n", avg_time_insert);
