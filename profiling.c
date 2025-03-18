@@ -60,7 +60,6 @@ int main(void) {
     uint64_t insert_count = 0, lookup_count = 0, delete_count = 0, reset_count = 0;
     int err;
     my_type_t random, lookup;
-    tiny_ptr_t tp;
     
     clock_t start = clock();
     for (uint32_t op = 0; op < NOPS; op++) {
@@ -69,19 +68,19 @@ int main(void) {
         if (r < 500) { // Insert
             char* key = random_string(10);
             my_type_t value = { rand(), random_string(15) };
-            tp = dt_insert(dt, &key, &value);
-            // if (!err) {
-            //     fprintf(stderr, "failed to insert value\n");
-            // }
+            err = dt_insert(dt, &key, &value);
+            if (!err) {
+                fprintf(stderr, "failed to insert value\n");
+            }
             insert_count++;
         } else if (r < 800) { // Lookup
-            err = dt_lookup(dt, &lookup_key, tp, &lookup);
+            err = dt_lookup(dt, &lookup_key, &lookup);
             if (err) {
                 fprintf(stderr, "failed to lookup value\n");
             }
             lookup_count++;
         } else if (r < 999) { // Delete
-            err = dt_delete(dt, &lookup_key, tp);
+            err = dt_delete(dt, &lookup_key);
             if (err) {
                 fprintf(stderr, "failed to delete value\n");
             }

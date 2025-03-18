@@ -38,9 +38,9 @@ typedef struct dt_t {
 dt_t *dt_create(size_t key_size, size_t value_size);
 void dt_destroy(dt_t *dt);
 
-tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value);
-int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out);
-int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp);
+int dt_insert(dt_t *dt, const void *key, const void *value);
+int dt_lookup(dt_t *dt, const void *key, void *value_out);
+int dt_delete(dt_t *dt, const void *key);
 void dt_reset(dt_t *dt);
 
 #endif /* TP_DT_H */
