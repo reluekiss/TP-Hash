@@ -19,7 +19,7 @@ typedef struct {
     uint32_t slots_per_bucket;  // bucket capacity
     size_t key_size;            // size (in bytes) of each key
     size_t value_size;          // size (in bytes) of each value
-    uint32_t current_capacity;  // active number of slots (always a multiple of slots_per_bucket)
+    uint32_t count;             // active number of slots (always a multiple of slots_per_bucket)
     char *keys;                 // pointer to keys array (allocated to MAX_CAPACITY * key_size bytes)
     char *values;               // pointer to values array (allocated to MAX_CAPACITY * value_size bytes)
     uint8_t *bitmap;            // occupancy bitmap (1 bit per slot, allocated to (MAX_CAPACITY+7)/8 bytes)
@@ -41,6 +41,7 @@ void dt_destroy(dt_t *dt);
 tiny_ptr_t dt_insert(dt_t *dt, const void *key, const void *value);
 int dt_lookup(dt_t *dt, const void *key, tiny_ptr_t tp, void *value_out);
 int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp);
+void dt_reset(dt_t *dt);
 
 #endif /* TP_DT_H */
 
@@ -100,7 +101,7 @@ static inline void *xmap(size_t size) {
 
 /* lb_create allocates a new load-balancing table.
    Note: the keys, values, and bitmap arrays are allocated with MAX_CAPACITY size
-   (so that future dynamic growth only adjusts t->current_capacity).
+   (so that future dynamic growth only adjusts t->count).
    This design ensures that already allocated tiny pointers remain valid.
 */
 static lb_table_t *lb_create(size_t key_size, size_t value_size,
@@ -110,7 +111,7 @@ static lb_table_t *lb_create(size_t key_size, size_t value_size,
     t->num_buckets = fmax(1, initial_capacity / slots_per_bucket);
     t->key_size = key_size;
     t->value_size = value_size;
-    t->current_capacity = initial_capacity;
+    t->count = initial_capacity;
     t->keys = xmap(MAX_CAPACITY * key_size);
     t->values = xmap(MAX_CAPACITY * value_size);
     t->bitmap = xmap((MAX_CAPACITY + 7) / 8);
@@ -118,15 +119,15 @@ static lb_table_t *lb_create(size_t key_size, size_t value_size,
 }
 
 /* lb_grow doubles the active capacity of the table, up to MAX_CAPACITY.
-   (Since memory was allocated for MAX_CAPACITY, we simply update current_capacity.)
+   (Since memory was allocated for MAX_CAPACITY, we simply update count.)
    This dynamic increase allows the table to absorb more allocations without rehashing old entries.
 */
 static int lb_grow(lb_table_t *t) {
-    if (t->current_capacity >= MAX_CAPACITY) return 0;
-    t->current_capacity *= 2;
-    if (t->current_capacity > MAX_CAPACITY)
-        t->current_capacity = MAX_CAPACITY;
-    t->num_buckets = t->current_capacity / t->slots_per_bucket;
+    if (t->count >= MAX_CAPACITY) return 0;
+    t->count *= 2;
+    if (t->count > MAX_CAPACITY)
+        t->count = MAX_CAPACITY;
+    t->num_buckets = t->count / t->slots_per_bucket;
     return 1;
 }
 
@@ -259,6 +260,22 @@ int dt_delete(dt_t *dt, const void *key, tiny_ptr_t tp) {
     else if (tp.table_id == 1)
         return lb_delete(dt->secondary, key, tp.bucket, tp.slot);
     return 0;
+}
+
+void dt_reset(dt_t *dt) {
+    lb_table_t *t = dt->primary;
+    t->count = INITIAL_CAPACITY;
+    t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
+    memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
+    memset(t->keys, 0, MAX_CAPACITY * t->key_size);
+    memset(t->values, 0, MAX_CAPACITY * t->value_size);
+
+    t = dt->secondary;
+    t->count = INITIAL_CAPACITY;
+    t->num_buckets = fmax(1, INITIAL_CAPACITY / t->slots_per_bucket);
+    memset(t->bitmap, 0, (MAX_CAPACITY + 7) / 8);
+    memset(t->keys, 0, MAX_CAPACITY * t->key_size);
+    memset(t->values, 0, MAX_CAPACITY * t->value_size);
 }
 
 #endif /* TP_DT_IMPLEMENTATION */
